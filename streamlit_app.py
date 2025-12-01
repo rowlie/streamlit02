@@ -1,90 +1,113 @@
 import streamlit as st
-from langchain.chat_models import ChatOpenAI
-from langchain.schema import HumanMessage
-from langchain.memory import ConversationBufferMemory
+import os
 
-# Import your core chain functions (these are based on your previous setup)
+# Import your chain functions from rag_chain
 from rag_chain import (
-    initialize_chain,
+    initialize_chain, 
     chat_with_rag_and_tools,
     get_memory_summary,
     clear_memory,
+    get_memory_messages_list
 )
 
-# Streamlit page setup
-st.set_page_config(page_title="LangChain Memory Chatbot", page_icon="🤖")
-st.title("LangChain Chatbot with Memory")
-
-# Initialize or load memory
-@st.cache(allow_output_mutation=True)
-def load_memory():
-    return ConversationBufferMemory(
-        memory_key="chat_history",
-        return_messages=True
-    )
-
-memory = load_memory()
-
-# Initialize Chat Model
-llm = ChatOpenAI(
-    model_name="gpt-3.5-turbo",
-    openai_api_key=st.secrets["OPENAI_API_KEY"],
-    temperature=0.7
+# Page configuration
+st.set_page_config(
+    page_title="RAG Agent with Memory",
+    page_icon="🤖",
+    layout="wide"
 )
 
-# User input
-if "history" not in st.session_state:
-    st.session_state["history"] = []
+# Initialize session state for conversation and chain
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-user_input = st.text_input("Your message:", key="user_input")
+if "chain_initialized" not in st.session_state:
+    st.session_state.chain_initialized = False
 
-# Buttons for control
-col1, col2 = st.columns([1, 1])
-if col1.button("Clear Chat"):
-    memory.clear()
-    st.session_state["history"] = []
-
-if user_input:
-    # Save user message to memory
-    memory.save_context({"input": user_input}, {})
+# Sidebar for configuration and controls
+with st.sidebar:
+    st.title("⚙️ Configuration")
     
-    # Build conversation history from memory
-    memory_vars = memory.load_memory_variables({})
-    history_messages = []
-    if "history" in memory_vars and memory_vars["history"]:
-        for msg in memory_vars["history"]:
-            if hasattr(msg, "content") and hasattr(msg, "type"):
-                if msg.type == "human":
-                    history_messages.append(HumanMessage(content=msg.content))
-                # You can extend here for AIMessage if needed
-    
-    # Call your chain with the message and history
-    response = chat_with_rag_and_tools(
-        user_message=user_input,
-        memory=memory,
-        chain=initialize_chain(),
-        history=history_messages
+    # Check API keys
+    if not os.getenv("OPENAI_API_KEY") or not os.getenv("PINECONE_API_KEY") or not os.getenv("LANGCHAIN_API_KEY"):
+        st.warning("⚠️ Please set OPENAI_API_KEY, PINECONE_API_KEY, and LANGCHAIN_API_KEY in secrets.")
+    else:
+        st.success("✅ API keys configured.")
+
+    st.divider()
+
+    # Memory management buttons
+    if st.button("🔄 Clear Chat History"):
+        st.session_state.messages = []
+        clear_memory()
+        st.session_state.chain_initialized = False
+        st.success("✅ Chat history and memory cleared!")
+        st.rerun()
+
+    # Show current memory status
+    with st.expander("📊 Memory Status"):
+        mem_summary = get_memory_summary()
+        history_preview = mem_summary.get("history", "")[:200] + "..." if mem_summary.get("history") else "No history yet."
+        message_count = mem_summary.get("message_count", 0)
+        st.markdown(f"**History Preview:**\n{history_preview}")
+        st.markdown(f"**Messages in memory:** {message_count}")
+
+    st.divider()
+    # Demo prompts
+    st.subheader("💡 Demo Prompts")
+    st.caption(
+        """
+        **Test your setup:**
+        - "What are my calorie targets given I weigh 75kg, have a desk job, and train 3 times per week?"
+        - "Adjust my plan as I can only train 2 times per week now."
+        - "What’s your advice based on my earlier info?"
+        """
     )
-    
-    # Save response to memory
-    memory.save_context({"input": user_input}, {"output": response})
-    
-    # Add to session history for display
-    st.session_state["history"].append(("User", user_input))
-    st.session_state["history"].append(("Assistant", response))
-    # Clear input box
-    st.session_state["user_input"] = ""
 
-# Display conversation history
-if st.session_state["history"]:
-    for speaker, message in st.session_state["history"]:
-        if speaker == "User":
-            st.markdown(f"**{speaker}:** {message}")
-        else:
-            st.markdown(f"**{speaker}:** {message}")
+# Main title
+st.title("🤖 Body Logic - RAG Agent with Memory")
+st.markdown(
+    "Ask questions about your fitness goals. I use tools, retrieval-augmented generation, and conversational memory to provide personalized advice."
+)
 
-# Optional: Display memory summary
-if st.button("Show Memory Summary"):
-    summary = get_memory_summary(memory)
-    st.write("**Memory Summary:**")
-    st.write(summary)
+# Initialize chain once
+if not st.session_state.chain_initialized:
+    try:
+        with st.spinner("🔧 Initializing RAG chain with LangChain memory..."):
+            initialize_chain()
+            st.session_state.chain_initialized = True
+    except Exception as e:
+        st.error(f"❌ Failed to initialize chain: {e}")
+        st.stop()
+
+# Show chat history
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# Input prompt
+if prompt := st.chat_input("Ask your question here..."):
+    # Append user message
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # Generate response
+    with st.chat_message("assistant"):
+        placeholder = st.empty()
+        try:
+            with st.spinner("🤖 Thinking..."):
+                response = chat_with_rag_and_tools(prompt)
+            placeholder.markdown(response)
+            st.session_state.messages.append({"role": "assistant", "content": response})
+        except Exception as e:
+            error_text = f"❌ Error: {e}"
+            placeholder.error(error_text)
+            st.session_state.messages.append({"role": "assistant", "content": error_text})
+
+# Footer info
+st.divider()
+st.caption(
+    "✨ Features: Retrieval from Pinecone • Tool calls (calorie estimator, calculator) • "
+    "Conversation memory via LangChain's ConversationBufferMemory"
+)
