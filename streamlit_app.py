@@ -1,160 +1,90 @@
 import streamlit as st
-import os
-from datetime import datetime
+from langchain.chat_models import ChatOpenAI
+from langchain.schema import HumanMessage
+from langchain.memory import ConversationBufferMemory
 
-# Import your chain logic with LangChain memory
-from rag_chain_memory import (
-    initialize_chain, 
+# Import your core chain functions (these are based on your previous setup)
+from rag_chain import (
+    initialize_chain,
     chat_with_rag_and_tools,
     get_memory_summary,
     clear_memory,
-    get_memory_messages_list
 )
 
-# Page config
-st.set_page_config(
-    page_title="RAG Agent with Tools",
-    page_icon="🤖",
-    layout="wide",
-)
+# Streamlit page setup
+st.set_page_config(page_title="LangChain Memory Chatbot", page_icon="🤖")
+st.title("LangChain Chatbot with Memory")
 
-# Initialize session state for UI
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-if "chain_initialized" not in st.session_state:
-    st.session_state.chain_initialized = False
-
-# ============================================================================
-# SIDEBAR - Configuration & Settings
-# ============================================================================
-
-with st.sidebar:
-    st.title("⚙️ Configuration")
-
-    # Check if required API keys are set
-    api_key = os.getenv("OPENAI_API_KEY")
-    pinecone_key = os.getenv("PINECONE_API_KEY")
-    langsmith_key = os.getenv("LANGCHAIN_API_KEY")
-
-    if not all([api_key, pinecone_key, langsmith_key]):
-        st.warning("⚠️ Missing environment variables!")
-        st.info(
-            """
-            Please set these in your Streamlit Cloud secrets:
-            - OPENAI_API_KEY
-            - PINECONE_API_KEY
-            - LANGCHAIN_API_KEY (LangSmith)
-            """
-        )
-    else:
-        st.success("✅ All API keys configured")
-
-    st.divider()
-
-    # Memory controls
-    st.subheader("💾 Memory Management")
-
-    if st.button("🔄 Clear Chat History"):
-        st.session_state.messages = []
-        clear_memory()
-        st.session_state.chain_initialized = False
-        st.success("✅ Chat history and memory cleared!")
-        st.rerun()
-
-    # Show memory status
-    with st.expander("📊 Memory Status"):
-        mem_summary = get_memory_summary()
-        st.caption(f"**History Preview:**\n{mem_summary['history'][:200]}..." if mem_summary.get('history') else "No memory yet")
-        st.caption(f"**Messages in memory:** {mem_summary.get('message_count', 0)}")
-
-    st.divider()
-
-    # Demo prompts
-    st.subheader("💡 Demo Prompts")
-    st.caption(
-        """
-        **Test Knowledge Base (Pinecone):**
-        - What is the most dangerous type of fat?
-        - What are the best exercises for your body type?
-        - What does alcohol do to your brain?
-
-        **Test Tools:**
-        - I am a 50 year old male 80kg what should be my calories targets?
-
-        **Test Conversational Memory:**
-        1. "I am a 75 kg male, office job, training 3 times per week. I want to lose a bit of fat but keep my strength. How would you structure my training and nutrition?"
-
-        2. "Based on what I told you earlier about my weight, job, and training schedule, adjust your plan if I can only train twice per week now. Please remind me what targets you gave me before and how they change."
-        
-        ✨ **The agent should recall your weight, job type, and original training frequency without you restating them!**
-        """
+# Initialize or load memory
+@st.cache(allow_output_mutation=True)
+def load_memory():
+    return ConversationBufferMemory(
+        memory_key="chat_history",
+        return_messages=True
     )
 
-# ============================================================================
-# MAIN CONTENT
-# ============================================================================
+memory = load_memory()
 
-st.title("🤖 Body Logic - RAG Agent with Memory")
-st.markdown(
-    "Ask questions about your fitness goals. I use tools, retrieval-augmented generation, and conversational memory to provide personalized advice."
+# Initialize Chat Model
+llm = ChatOpenAI(
+    model_name="gpt-3.5-turbo",
+    openai_api_key=st.secrets["OPENAI_API_KEY"],
+    temperature=0.7
 )
 
-# Initialize chain once
-if not st.session_state.chain_initialized:
-    try:
-        with st.spinner("🔧 Initializing RAG chain with LangChain memory..."):
-            initialize_chain()
-            st.session_state.chain_initialized = True
-    except Exception as e:
-        st.error(f"❌ Failed to initialize chain: {str(e)}")
-        st.stop()
+# User input
+if "history" not in st.session_state:
+    st.session_state["history"] = []
+
+user_input = st.text_input("Your message:", key="user_input")
+
+# Buttons for control
+col1, col2 = st.columns([1, 1])
+if col1.button("Clear Chat"):
+    memory.clear()
+    st.session_state["history"] = []
+
+if user_input:
+    # Save user message to memory
+    memory.save_context({"input": user_input}, {})
+    
+    # Build conversation history from memory
+    memory_vars = memory.load_memory_variables({})
+    history_messages = []
+    if "history" in memory_vars and memory_vars["history"]:
+        for msg in memory_vars["history"]:
+            if hasattr(msg, "content") and hasattr(msg, "type"):
+                if msg.type == "human":
+                    history_messages.append(HumanMessage(content=msg.content))
+                # You can extend here for AIMessage if needed
+    
+    # Call your chain with the message and history
+    response = chat_with_rag_and_tools(
+        user_message=user_input,
+        memory=memory,
+        chain=initialize_chain(),
+        history=history_messages
+    )
+    
+    # Save response to memory
+    memory.save_context({"input": user_input}, {"output": response})
+    
+    # Add to session history for display
+    st.session_state["history"].append(("User", user_input))
+    st.session_state["history"].append(("Assistant", response))
+    # Clear input box
+    st.session_state["user_input"] = ""
 
 # Display conversation history
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+if st.session_state["history"]:
+    for speaker, message in st.session_state["history"]:
+        if speaker == "User":
+            st.markdown(f"**{speaker}:** {message}")
+        else:
+            st.markdown(f"**{speaker}:** {message}")
 
-# Chat input
-if prompt := st.chat_input("Ask your question here..."):
-    # Add user message to session state (UI display)
-    st.session_state.messages.append({
-        "role": "user",
-        "content": prompt,
-    })
-
-    # Display user message
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    # Generate response
-    with st.chat_message("assistant"):
-        message_placeholder = st.empty()
-        try:
-            with st.spinner("Thinking... (using RAG + tools + memory)"):
-                # Call RAG chain - memory is saved automatically inside this function
-                response = chat_with_rag_and_tools(prompt)
-
-            # Display response
-            message_placeholder.markdown(response)
-
-            # Add to session state (UI display)
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": response,
-            })
-
-        except Exception as e:
-            error_msg = f"❌ Error: {str(e)}"
-            message_placeholder.error(error_msg)
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": error_msg,
-            })
-
-# Footer
-st.divider()
-st.caption(
-    "✨ **Features:** RAG retrieval from Pinecone • Tool calling (calorie estimator, calculator, time) • "
-    "**LangChain ConversationBufferMemory** for conversational context"
-)
+# Optional: Display memory summary
+if st.button("Show Memory Summary"):
+    summary = get_memory_summary(memory)
+    st.write("**Memory Summary:**")
+    st.write(summary)
